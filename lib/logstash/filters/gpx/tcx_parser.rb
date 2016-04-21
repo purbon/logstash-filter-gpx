@@ -9,8 +9,18 @@ module Guppy
       parser
     end
 
-    def initialize(file)
+    def initialize(file=nil)
       @file = file
+    end
+
+    def self.load(data)
+      me = self.new
+      me.load(data)
+      me
+    end
+
+    def load(data)
+      @doc = Nokogiri.XML(data)
     end
 
     def parse

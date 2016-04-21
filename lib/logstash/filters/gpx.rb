@@ -5,6 +5,7 @@ require "logstash/json"
 require "logstash/timestamp"
 
 require_relative "gpx/gpx_parser"
+require_relative "gpx/tcx_parser"
 
 class LogStash::Filters::Gpx < LogStash::Filters::Base
 
@@ -39,12 +40,90 @@ class LogStash::Filters::Gpx < LogStash::Filters::Base
   # NOTE: if the `target` field already exists, it will be overwritten!
   config :target, :validate => :string
 
-  public
+
+  config :document_type, :validate => :string, :default => "gpx"
+
   def register
     # Nothing to do here
   end # def register
 
-  public
+
+  def dump_gpx(source)
+    gpx = Guppy::GpxParser.load(source)
+    hash_dump = { "activities" => [] }
+    gpx.activities.each do |_activity|
+      total_time = 0
+      activity   = { "distance" => _activity.distance, "laps" => [] }
+      _activity.laps.each do |_lap|
+        total_time += _lap.time.to_i
+        lap = { "distance" => _lap.distance,
+                "time_in_sec" => _lap.time.to_i,
+                "start_time"  => _lap.track_points.first.time.to_s,
+                "finish_time" => _lap.track_points.last.time.to_s,
+                "speed"       => ((_lap.time.to_f/60)/(_lap.distance.to_f/1000))
+        }
+        lap["points"] = _lap.track_points.map do |track|
+          [track.latitude, track.longitude]
+        end
+        activity["laps"] << lap
+      end
+      activity["time"] = total_time
+      hash_dump["activities"] << activity
+    end
+    hash_dump["@timestamp"] = LogStash::Timestamp.at(gpx.activities.first.laps.first.track_points.first.time.to_i)
+    hash_dump
+  end
+
+  def dump_tcx(source)
+    tcx = Guppy::TcxParser.load(source)
+    hash_dump = { "activities" => [] }
+    total_time = 0
+    location   = []
+    tcx.activities.each do |_activity|
+      activity = { "distance" => _activity.distance,
+                   "sport"    => _activity.sport,
+                   "date"     => _activity.date.to_i,
+                   "laps"     => [] }
+      i=0
+      _activity.laps.each do |_lap|
+        next if _lap.distance.to_f == 0
+        total_time += _lap.time.to_i
+        lap = { "distance"    => _lap.distance.to_f,
+                "max_speed"   => _lap.max_speed.to_f,
+                "calories"    => _lap.calories,
+                "time_in_sec" => _lap.time.to_i,
+                "pace"        => (((_lap.time.to_i)/60.0)/(_lap.distance.to_f/1000)).to_f,
+                "speed"       => (_lap.distance.to_f/1000)/(_lap.time.to_f/3600),
+                "id"          => i
+        }
+        if _lap.track_points.count > 0
+          start_time         = _lap.track_points.first.time
+          lap["start_time"]  = start_time.to_i
+          lap["finish_time"] = _lap.track_points.last.time.to_i
+        end
+        last_altitude_point = 0.0
+        lap["points"] = _lap.track_points.map do |track|
+          m    = { "coordinates" => [track.longitude, track.latitude],
+                   "altitude"    => track.altitude.to_f,
+                   "time"        => track.time.to_i-start_time.to_i,
+                   "increase"    => track.altitude.to_f-last_altitude_point }
+          last_altitude_point = track.altitude.to_f
+          m
+        end
+        location = lap["points"].first["coordinates"] if location.empty? && (_lap.track_points.count > 0)
+        activity["laps"] << lap
+        i+=1
+      end
+      activity["time"]  = total_time
+      activity["pace"]  = (activity["time"].to_f/60)/(activity["distance"].to_f/1000)
+      activity["speed"] = (activity["distance"].to_f/1000)/(activity["time"].to_f/3600)
+      hash_dump["activities"] << activity
+    end
+    hash_dump["@timestamp"] = LogStash::Timestamp.at(tcx.activities.first.date.to_i)
+    hash_dump["@location"]  = location
+    hash_dump
+  end
+
   def filter(event)
     return unless filter?(event)
 
@@ -55,25 +134,13 @@ class LogStash::Filters::Gpx < LogStash::Filters::Base
     source = event[@source]
 
     begin
-      gpx = Guppy::GpxParser.load(source)
-      hash_dump = { "activities" => [] }
-      gpx.activities.each do |_activity|
-        activity = { "distance" => _activity.distance, "laps" => [] }
-        _activity.laps.each do |_lap|
-          lap = { "distance" => _lap.distance,
-                  "time_in_sec" => _lap.time,
-                  "start_time"  => _lap.track_points.first.time,
-                  "finish_time" => _lap.track_points.last.time,
-                  "speed"       => ((_lap.time.to_f/60)/(_lap.distance.to_f/1000))
-          }
-          lap["points"] = _lap.track_points.map do |track|
-            [track.latitude, track.longitude]
-          end
-          activity["laps"] << lap
-        end
-        hash_dump["activities"] << activity
+      if @document_type.to_s == "tcx"
+        hash_dump = dump_tcx(source)
+      else
+        hash_dump = dump_gpx(source)
       end
-
+      event["@timestamp"] = hash_dump.delete("@timestamp")
+      event["geoip"] = { "location" => hash_dump.delete("@location") }
       if @target
         event[@target] = hash_dump.clone
       else
@@ -83,6 +150,7 @@ class LogStash::Filters::Gpx < LogStash::Filters::Base
           event[k] = v
         end
       end
+
       filter_matched(event)
     rescue => e
       add_failure_tag(event)

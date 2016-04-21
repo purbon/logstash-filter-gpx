@@ -87,4 +87,39 @@ describe LogStash::Filters::Gpx do
     end
 
   end
+
+  describe "tcx mode" do
+
+    let(:message) { File.read(File.join(File.dirname(__FILE__), "fixtures", "dump.tcx")) }
+
+    let(:config) { {"source" => "message", "document_type" => "tcx"} }
+
+    subject do
+      described_class.new(config)
+    end
+
+    it "parses data without errors" do
+      expect { subject.filter(event) }.not_to raise_error
+    end
+
+    it "extract the expected schema" do
+      subject.filter(event)
+      expect(event.to_hash).to include("activities")
+      expect(event.to_hash["activities"][0]).to include("distance", "laps")
+      expect(event.to_hash["activities"][0]["laps"][0]).to include("distance", "time_in_sec", "speed", "points")
+    end
+
+    describe "using target" do
+
+      let(:config) { {"source" => "message", "target" => "dest", "document_type" => "tcx" } }
+
+      it "adds the parsed element to target" do
+        subject.filter(event)
+        expect(event.to_hash.keys).to include("dest")
+        expect(event.to_hash["dest"]).to include("activities")
+      end
+
+    end
+  end
+
 end
